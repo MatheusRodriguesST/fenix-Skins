@@ -53,8 +53,38 @@ export default function QuickViewModal({
           <button onClick={() => setQuickViewItem(null)} className="text-gray-400 hover:text-gray-200"><X className="w-6 h-6" /></button>
         </div>
 
-        <div className="w-full h-48 bg-neutral-800/50 rounded-2xl overflow-hidden mb-6 flex items-center justify-center shadow-inner">
+        <div className="relative w-full h-48 bg-neutral-800/50 rounded-2xl overflow-hidden mb-6 flex items-center justify-center shadow-inner">
           {quickViewItem.image && <img src={quickViewItem.image} className="max-h-44 object-contain" />}
+          {/* Charms in top-right corner */}
+          {quickViewItem.charms?.length > 0 && (
+            <div className="absolute top-2 right-2 flex flex-col gap-1">
+              {quickViewItem.charms.slice(0, 2).map((charm, i) => (
+                <div key={i} className="w-8 h-8 bg-purple-500/80 rounded-full flex items-center justify-center text-xs text-white font-bold shadow-lg">
+                  {charm.charAt(0).toUpperCase()}
+                </div>
+              ))}
+              {quickViewItem.charms.length > 2 && (
+                <div className="w-8 h-8 bg-purple-500/80 rounded-full flex items-center justify-center text-xs text-white font-bold shadow-lg">
+                  +{quickViewItem.charms.length - 2}
+                </div>
+              )}
+            </div>
+          )}
+          {/* Stickers below image */}
+          {quickViewItem.stickers?.length > 0 && (
+            <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 flex gap-1">
+              {quickViewItem.stickers.slice(0, 4).map((sticker, i) => (
+                <div key={i} className="w-6 h-6 bg-yellow-500/80 rounded flex items-center justify-center text-xs text-black font-bold shadow-md">
+                  {sticker.charAt(0).toUpperCase()}
+                </div>
+              ))}
+              {quickViewItem.stickers.length > 4 && (
+                <div className="w-6 h-6 bg-yellow-500/80 rounded flex items-center justify-center text-xs text-black font-bold shadow-md">
+                  +{quickViewItem.stickers.length - 4}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-6 text-sm mb-6">

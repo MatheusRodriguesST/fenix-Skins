@@ -33,7 +33,7 @@ export default function Header({ query, setQuery, cartLength, setCartOpen, loadi
   }
 
   function handleLogout() {
-    window.location.href = "/api/auth/steam/logout";
+    window.location.href = "/api/auth/logout";
   }
 
   return (

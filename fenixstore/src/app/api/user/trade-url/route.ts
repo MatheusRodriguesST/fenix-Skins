@@ -1,20 +1,28 @@
-import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseServer";
+// src/app/api/user/trade-url/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseServer"; // Assumindo que é a factory function
 import { getUserFromRequest } from "@/lib/getUserFromRequest";
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   const user = await getUserFromRequest(req);
-  if (!user) return NextResponse.json({ ok: false, message: "Not authenticated" }, { status: 401 });
-
-  const body = await req.json().catch(() => ({}));
-  const trade_url = (body.trade_url || "").trim();
-  if (!trade_url) return NextResponse.json({ ok: false, message: "Missing trade_url" }, { status: 400 });
-
-  const { error } = await supabaseAdmin.from("users").update({ trade_url, updated_at: new Date().toISOString() }).eq("id", user.id);
-  if (error) {
-    console.error("supabase update trade_url error", error);
-    return NextResponse.json({ ok: false, message: "DB error" }, { status: 500 });
+  if (!user) {
+    return NextResponse.json({ ok: false, message: "Unauthorized" }, { status: 403 });
   }
 
-  return NextResponse.json({ ok: true, trade_url });
+  const { trade_url } = await req.json(); // Assumindo que trade_url vem no body do POST
+  if (!trade_url) return NextResponse.json({ ok: false, message: "Missing trade_url" }, { status: 400 });
+
+  try {
+    const supabase = supabaseAdmin(); // Chame como função para obter o client
+    const { error } = await supabase
+      .from("users")
+      .update({ trade_url, updated_at: new Date().toISOString() })
+      .eq("id", user.id);
+
+    if (error) throw error;
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error("supabase update trade_url error", err);
+    return NextResponse.json({ ok: false, message: "DB error" }, { status: 500 });
+  }
 }

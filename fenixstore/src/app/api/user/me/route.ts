@@ -1,47 +1,59 @@
-// app/api/user/me/route.ts
+// src/app/api/user/me/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseServer";
-import { verify } from "@/lib/jwt";
+import { verify } from "@/lib/jwt"; // assume you have a verify function in your jwt lib
 
+/**
+ * Endpoint GET /api/user/me
+ * - Lê cookie 'token'
+ * - Verifica/decodifica JWT para obter steamId/userId
+ * - Busca usuário no banco via supabaseAdmin()
+ */
 export async function GET(req: NextRequest) {
   try {
-    const token = req.cookies.get("fenix_token")?.value;
-    if (!token) {
-      console.log("GET /api/user/me -> no token");
-      return NextResponse.json({ ok: false, message: "No token" }, { status: 401 });
+    const cookie = req.cookies.get("token")?.value;
+    if (!cookie) {
+      console.warn("API /user/me: token cookie ausente");
+      return new NextResponse(null, { status: 401 });
     }
 
-    let payload;
+    // Decodifica/verifica token JWT (implemente verify no seu lib/jwt)
+    let payload: any;
     try {
-      payload = await verify(token);
-    } catch (e) {
-      console.error("GET /api/user/me -> verify failed", e);
-      return NextResponse.json({ ok: false, message: "Invalid token" }, { status: 401 });
+      payload = verify(cookie);
+    } catch (err) {
+      console.error("API /user/me: token inválido:", err);
+      return new NextResponse(null, { status: 401 });
     }
 
-    if (!payload?.sub) {
-      console.log("GET /api/user/me -> token missing sub:", payload);
-      return NextResponse.json({ ok: false, message: "Invalid token payload" }, { status: 401 });
+    const steamId = payload?.steamId ?? null;
+    const userId = payload?.userId ?? null;
+
+    if (!steamId && !userId) {
+      console.warn("API /user/me: token não possui steamId nem userId");
+      return new NextResponse(null, { status: 401 });
     }
 
-    const steamId = payload.sub;
-    console.log("GET /api/user/me -> steamId:", steamId);
+    const supabase = supabaseAdmin();
 
-    const { data: user, error } = await supabaseAdmin
-      .from("users")
-      .select("*")
-      .eq("id", steamId)
-      .single();
+    // Prefer buscar pelo id (userId) se presente, senão por steam_id
+    let query = supabase.from("users").select("*");
+    query = userId ? query.eq("id", userId) : query.eq("steam_id", steamId);
+    const { data: user, error } = await query.maybeSingle();
 
-    if (error || !user) {
-      console.error("GET /api/user/me -> user not found or db error:", error);
-      return NextResponse.json({ ok: false, message: "User not found" }, { status: 404 });
+    if (error) {
+      console.error("API /user/me error:", error);
+      return new NextResponse(null, { status: 500 });
     }
 
-    const fullUser = { ...user, balance: user.balance ?? 0 };
-    return NextResponse.json({ ok: true, user: fullUser });
+    if (!user) {
+      return new NextResponse(null, { status: 404 });
+    }
+
+    // Retorna o usuário (filtre campos sensíveis se necessário)
+    return NextResponse.json({ user });
   } catch (err) {
     console.error("API /user/me error:", err);
-    return NextResponse.json({ ok: false, message: "Internal error" }, { status: 500 });
+    return new NextResponse(null, { status: 500 });
   }
 }

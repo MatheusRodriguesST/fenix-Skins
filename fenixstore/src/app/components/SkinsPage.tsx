@@ -1,7 +1,13 @@
-
 // src/pages/SkinsPage.tsx (or app/skins/page.tsx)
+// Main changes in loadUserItems: Always fetch both DB and Steam, merge them.
+// Added steam_id to User interface.
+// Improved possibleSteamId to prefer user.steam_id if valid, else fallback to user.id (for route to handle).
+// Added more logging for debugging.
+// In setUserItems, concatenate DB and Steam items (no duplicates assumed, as DB are purchased/pending, Steam are current).
+
 "use client";
 
+import { motion } from "framer-motion";
 import React, { useEffect, useMemo, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 import Header from "../components/Header";
@@ -34,6 +40,7 @@ interface User {
   trade_url?: string;
   balance?: number;
   avatar?: string;
+  steam_id?: string; // Adicionado para compatibilidade com steam_id do usuário
 }
 
 interface ListingItem {
@@ -77,35 +84,75 @@ function calcPayout(price: number) {
 }
 
 function parseFullName(full: string | undefined) {
-  // ... (keep as is)
+  if (!full) return { weapon: "Unknown", skin: "Unknown", condition: "Unknown" };
+  const parts = full.split(" | ");
+  const weapon = parts[0] || "Unknown";
+  let skin = parts[1] || "Unknown";
+  let condition = parts[2] || "Unknown";
+
+  // Extrai condition de ( ) no final do skin name
+  const conditionMatch = skin.match(/^(.*?) \(([^)]+)\)$/);
+  if (conditionMatch) {
+    skin = conditionMatch[1].trim();
+    condition = conditionMatch[2].trim();
+  }
+
+  return { weapon, skin, condition };
 }
 
 function categorizeWeapon(weapon: string) {
-  // ... (keep as is)
+  const map: { [key: string]: string } = {
+    "AK-47": "Rifles",
+    "M4A4": "Rifles",
+    "M4A1-S": "Rifles",
+    "AWP": "Sniper Rifles",
+    "Glock-18": "Pistols",
+    // Add more as needed
+  };
+  return map[weapon] || "Other";
 }
 
 function suggestPriceFromName(name: string) {
-  // ... (keep as is)
+  // Simple mock; in real, use Steam API or DB
+  return Math.random() * 100 + 10;
 }
 
 function determineRarity(name: string) {
-  // ... (keep as is)
+  const rarities = ["Consumer Grade", "Industrial Grade", "Mil-Spec", "Restricted", "Classified", "Covert", "Contraband"];
+  return rarities[Math.floor(Math.random() * rarities.length)];
 }
 
 function getRarityColor(rarity: string) {
-  // ... (keep as is)
+  const colors: { [key: string]: string } = {
+    "Consumer Grade": "bg-gray-500",
+    "Industrial Grade": "bg-blue-500",
+    "Mil-Spec": "bg-blue-600",
+    "Restricted": "bg-purple-500",
+    "Classified": "bg-red-500",
+    "Covert": "bg-gold-500",
+    "Contraband": "bg-orange-500",
+  };
+  return colors[rarity] || "bg-gray-500";
 }
 
 function getRarityGlow(rarity: string) {
-  // ... (keep as is)
+  return rarity === "Covert" ? "shadow-yellow-500/50" : "shadow-transparent";
 }
 
 function getConditionColor(condition: string) {
-  // ... (keep as is)
+  const colors: { [key: string]: string } = {
+    "Factory New": "text-green-400",
+    "Minimal Wear": "text-green-300",
+    "Field-Tested": "text-yellow-400",
+    "Well-Worn": "text-orange-400",
+    "Battle-Scarred": "text-red-400",
+  };
+  return colors[condition] || "text-gray-400";
 }
 
 export default function SkinsPage() {
   const [user, setUser] = useState<User | null>(null);
+  const [selectedItemToSell, setSelectedItemToSell] = useState<ListingItem | null>(null);
   const [loadingUser, setLoadingUser] = useState(true);
   const [items, setItems] = useState<ListingItem[]>([]);
   const [auctionItems, setAuctionItems] = useState<AuctionItem[]>([]);
@@ -139,6 +186,22 @@ export default function SkinsPage() {
   const [sellMode, setSellMode] = useState(false);
   const pageSize = 12;
 
+  // Função helper pra cache local (10 min)
+  const getLocalCache = (key: string) => {
+    const item = localStorage.getItem(key);
+    if (!item) return null;
+    const { data, timestamp } = JSON.parse(item);
+    if (Date.now() - timestamp > 10 * 60 * 1000) {  // 10 min
+      localStorage.removeItem(key);
+      return null;
+    }
+    return data;
+  };
+
+  const setLocalCache = (key: string, data: any) => {
+    localStorage.setItem(key, JSON.stringify({ data, timestamp: Date.now() }));
+  };
+
   function addNotification(message: string, type: "success" | "error" | "info" = "info") {
     const id = nextNotifId;
     setNextNotifId(id + 1);
@@ -161,9 +224,13 @@ export default function SkinsPage() {
           return;
         }
         const json = await res.json();
-        if (json.ok) {
-          setUser(json.user);
-          if (json.user && !json.user.trade_url) {
+  
+        // compatibilidade com { ok: true, user } e com { user }
+        const userData = json?.user ?? (json?.ok ? json?.data ?? null : null);
+  
+        if (userData) {
+          setUser(userData);
+          if (userData && !userData.trade_url) {
             setShowTradeModal(true);
           }
         } else {
@@ -171,19 +238,21 @@ export default function SkinsPage() {
         }
       } catch (err) {
         console.error("fetchMe error:", err);
+        setUser(null);
       } finally {
         setLoadingUser(false);
       }
     }
-
+  
     fetchMe();
-
+  
     const timer = setTimeout(() => {
       if (!user) fetchMe();
     }, 1000);
-
+  
     return () => clearTimeout(timer);
   }, []);
+  
 
   async function saveTradeUrl() {
     if (!user) return;
@@ -258,35 +327,224 @@ export default function SkinsPage() {
     if (viewMode === "inventory" && user) {
       loadUserItems();
     }
-  }, [viewMode, user]);
+  }, [viewMode, user?.id, user?.steam_id]); // Alterado para user?.steam_id (para reagir se mudar)
 
   async function loadAuctions() {
-    // ... (keep as is, but update AuctionItem to include new fields if needed)
+    setLoading(true);
+    setError(null);
+    try {
+      const { data, error } = await supabase
+        .from("auctions")
+        .select("*")
+        .eq("status", "active");
+      if (error) throw error;
+      setAuctionItems(data || []);
+    } catch (err) {
+      console.error("loadAuctions error", err);
+      setError("Erro ao carregar leilões.");
+      setAuctionItems([]);
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function processEndedAuction(auction: any) {
-    // ... (keep as is, but payout to sellerId)
+    if (auction.status !== "ended") return;
+    const { data: seller } = await supabase.from("users").select("balance").eq("id", auction.sellerId).single();
+    if (seller) {
+      const payout = auction.currentBid * 0.95;
+      await supabase.from("users").update({ balance: seller.balance + payout }).eq("id", auction.sellerId);
+    }
+    await supabase.from("auctions").update({ status: "completed" }).eq("id", auction.id);
   }
 
+  // Carrega inventário do usuário usando sua rota /api/bots/[steamId]/inventory
   async function loadUserItems() {
-    // ... (keep as is, update userItems to include new fields)
+    if (!user) return;
+    setLoading(true);
+    setError(null);
+
+    try {
+      console.debug("[loadUserItems] user:", user);
+
+      // 1) Carrega itens COMPRADOS do DB (user_items) - sempre
+      const resDb = await fetch(`/api/user/${user.id}/items`, { credentials: "include" });
+      const jsonDb = await resDb.text().then((t) => {
+        try { return JSON.parse(t); } catch (e) { return { ok: false, raw: t }; }
+      });
+
+      console.debug("[loadUserItems] /api/user/:", resDb.status, jsonDb);
+
+      let dbItems: (ListingItem & { dbId?: string })[] = [];
+      if (resDb.ok && jsonDb.ok && Array.isArray(jsonDb.items) && jsonDb.items.length > 0) {
+        dbItems = jsonDb.items.map((it: any) => ({
+          id: String(it.item?.id ?? it.id),
+          displayName: it.item?.displayName ?? it.name ?? it.item?.market_hash_name ?? "Unknown",
+          weapon: it.item?.weapon ?? "Unknown",
+          skin: it.item?.skin ?? it.item?.market_hash_name ?? it.item?.name ?? "Unknown",
+          condition: it.item?.condition ?? "Unknown",
+          image: it.item?.image ?? it.icon_url ?? null,
+          price: it.item?.recommended_price ?? it.price ?? 0,
+          tradable: Boolean(it.item?.tradable ?? it.tradable ?? true),
+          rarity: determineRarity(it.item?.displayName ?? it.name ?? ""),
+          sellerId: user.id,
+          dbId: it.id,
+        })) as (ListingItem & { dbId?: string })[];
+
+        console.debug("[loadUserItems] mapped from DB (comprados):", dbItems.length);
+      }
+
+      // 2) Fetch itens da Steam (sempre, para mostrar ambos DB + Steam)
+      let steamItems: any[] = [];
+      const cacheKey = `steam_inventory_${user.id}`;
+      let cached = getLocalCache(cacheKey);
+      if (cached) {
+        steamItems = cached;
+        console.debug("[loadUserItems] using cached Steam items:", steamItems.length);
+      } else {
+        let possibleSteamId: string | null = null;
+        if (user.steam_id && /^\d{17}$/.test(user.steam_id)) {
+          possibleSteamId = user.steam_id;
+          console.debug("[loadUserItems] using valid user.steam_id:", possibleSteamId);
+        } else {
+          possibleSteamId = user.id; // Fallback para user.id (UUID), rota vai pegar user.steam_id do DB
+          console.debug("[loadUserItems] fallback to user.id (UUID):", possibleSteamId, " - rota deve lidar");
+        }
+
+        if (possibleSteamId) {
+          const res = await fetch(`/api/bots/${possibleSteamId}/inventory?limit=500&only_tradable=1`);
+          if (!res.ok) {
+            const txt = await res.text();
+            console.warn(`[loadUserItems] /api/bots/${possibleSteamId}/inventory failed:`, res.status, txt);
+            addNotification("Falha ao carregar itens da Steam. Mostrando apenas itens comprados.", "info");
+          } else {
+            const json = await res.json();
+            console.debug("[loadUserItems] bot inventory response:", json?.items?.length ?? null);
+            if (json.ok && Array.isArray(json.items) && json.items.length > 0) {
+              steamItems = json.items;
+              setLocalCache(cacheKey, steamItems);  // Cache local por 10 min
+            }
+          }
+        } else {
+          console.warn("[loadUserItems] no possibleSteamId available, skipping Steam fetch");
+        }
+      }
+
+      const steamMapped: (ListingItem & { dbId?: string })[] = steamItems.map((it: any) => {
+        const fullName = it.name ?? it.market_hash_name ?? "Unknown";
+        const parsed = parseFullName(fullName);
+        return {
+          id: String(it.id),
+          displayName: fullName,
+          weapon: parsed.weapon,
+          skin: parsed.skin,
+          condition: parsed.condition,
+          image: it.icon_url ?? null,
+          price: it.recommended_price ?? it.steam_price_number ?? suggestPriceFromName(fullName),
+          tradable: Boolean(it.tradable),
+          rarity: determineRarity(fullName),
+          sellerId: user.id,
+          dbId: undefined,
+          float: it.float ?? undefined,
+          pattern: it.pattern ?? undefined,
+          stickers: it.stickers ?? [],
+          charms: it.charms ?? [],
+        };
+      });
+
+      // 3) Merge: DB (comprados) + Steam (principalmente estes)
+      const mergedItems = [...dbItems, ...steamMapped];
+      console.debug("[loadUserItems] merged items (DB + Steam):", mergedItems.length);
+      setUserItems(mergedItems);
+    } catch (err) {
+      console.error("loadUserItems error", err);
+      setError("Falha ao carregar inventário do usuário.");
+      setUserItems([]);
+    } finally {
+      setLoading(false);
+    }
   }
+
+
+// Cria uma listing a partir do item selecionado no inventário
+async function createListingFromUserItem(item: ListingItem, price: number) {
+  if (!user) {
+    addNotification("Faça login para listar itens.", "error");
+    return { ok: false, message: "Unauthorized" };
+  }
+
+  try {
+    const payload = {
+      seller_id: user.id,
+      item,
+      price,
+    };
+    const res = await fetch("/api/listings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const j = await res.json();
+    if (!res.ok || !j.ok) {
+      console.error("create listing failed", j);
+      addNotification("Erro ao criar anúncio.", "error");
+      return { ok: false, message: j?.message ?? "Erro" };
+    }
+
+    // remover item do inventário local (já foi movido para listings no backend)
+    setUserItems((prev) => prev.filter((ui) => ui.id !== item.id));
+    addNotification("Item listado com sucesso!", "success");
+    setSellMode(false);
+    setSelectedItemToSell(null);
+    return { ok: true, listing: j.listing };
+  } catch (err) {
+    console.error("createListingFromUserItem error", err);
+    addNotification("Erro ao criar anúncio.", "error");
+    return { ok: false, message: "Internal error" };
+  }
+}
+
 
   async function createAuction() {
-    // ... (keep as is)
+    if (!selectedItemForAuction || !user) return;
+    try {
+      const { data, error } = await supabase
+        .from("auctions")
+        .insert({
+          item: selectedItemForAuction,
+          seller_id: user.id,
+          min_bid: minBid,
+          current_bid: minBid,
+          end_time: new Date(Date.now() + auctionTime * 60 * 60 * 1000),
+          status: "active",
+        })
+        .select()
+        .single();
+      if (error) throw error;
+      setUserItems((prev) => prev.filter((ui) => ui.id !== selectedItemForAuction.id));
+      addNotification("Leilão criado com sucesso!", "success");
+      setShowAuctionModal(false);
+      loadAuctions();
+    } catch (err) {
+      console.error("createAuction error", err);
+      addNotification("Erro ao criar leilão.", "error");
+    }
   }
 
   const categories = useMemo(() => {
     const set = new Set<string>(["Todas"]);
-    for (const it of items) set.add(categorizeWeapon(it.weapon));
+    const listSource = viewMode === "inventory" ? userItems : items;
+    for (const it of listSource) set.add(categorizeWeapon(it.weapon));
     return Array.from(set);
-  }, [items]);
-
+  }, [items, userItems, viewMode]);
+  
   const conditions = useMemo(() => {
     const s = new Set<string>();
-    for (const it of items) s.add(it.condition || "Unknown");
+    const listSource = viewMode === "inventory" ? userItems : items;
+    for (const it of listSource) s.add(it.condition || "Unknown");
     return Array.from(s);
-  }, [items]);
+  }, [items, userItems, viewMode]);
+  
 
   const filtered = useMemo(() => {
     let list: any[] = [];
@@ -365,20 +623,43 @@ export default function SkinsPage() {
       // Update listing status or remove
       await supabase.from("listings").update({ status: "sold" }).eq("item->>id", line.item.id);
 
+      // *** NOVO: Insere os itens COMPRADOS no user_items do buyer (pra trade futura)
       for (let i = 0; i < line.qty; i++) {
-        await supabase.from("user_items").insert({ user_id: user.id, item: line.item });
+        await supabase.from("user_items").insert({ 
+          user_id: user.id, 
+          item: line.item,
+          created_at: new Date().toISOString()
+        });
       }
     }
+
+    // Limpa cache local do buyer (pra refetch itens comprados)
+    localStorage.removeItem(`steam_inventory_${user.id}`);
 
     setItems((prev) => prev.filter((it) => !cart.some((c) => c.item.id === it.id)));
     setCart([]);
     setCartOpen(false);
-    addNotification("Compra finalizada com sucesso!", "success");
-    loadUserItems();
+    addNotification("Compra finalizada com sucesso! Itens adicionados ao seu inventário para trade.", "success");
+    loadUserItems();  // Refetch pra mostrar os novos comprados
   }
 
   async function placeBid(item: AuctionItem) {
-    // ... (keep as is)
+    const bid = bidInputs[item.auctionId] || item.minBid;
+    if (bid <= item.currentBid) {
+      addNotification("Lance deve ser maior que o atual.", "error");
+      return;
+    }
+    try {
+      await supabase
+        .from("auctions")
+        .update({ current_bid: bid, bidder_id: user?.id })
+        .eq("id", item.auctionId);
+      addNotification("Lance colocado com sucesso!", "success");
+      loadAuctions();
+    } catch (err) {
+      console.error("placeBid error", err);
+      addNotification("Erro ao colocar lance.", "error");
+    }
   }
 
   return (
@@ -447,24 +728,26 @@ export default function SkinsPage() {
           ) : (
             <>
               <ItemGrid
-                viewMode={viewMode}
-                pageItems={pageItems}
-                favorites={favorites}
-                toggleFavorite={toggleFavorite}
-                setQuickViewItem={setQuickViewItem}
-                addToCart={addToCart}
-                bidInputs={bidInputs}
-                setBidInputs={setBidInputs}
-                placeBid={placeBid}
-                setSelectedItemForAuction={setSelectedItemForAuction}
-                setShowAuctionModal={setShowAuctionModal}
-                getRarityColor={getRarityColor}
-                getRarityGlow={getRarityGlow}
-                getConditionColor={getConditionColor}
-                calcPayout={calcPayout}
-                user={user}
-                setError={setError}
-              />
+                  viewMode={viewMode}
+                  pageItems={pageItems}
+                  favorites={favorites}
+                  toggleFavorite={toggleFavorite}
+                  setQuickViewItem={setQuickViewItem}
+                  addToCart={addToCart}
+                  bidInputs={bidInputs}
+                  setBidInputs={setBidInputs}
+                  placeBid={placeBid}
+                  setSelectedItemForAuction={setSelectedItemForAuction}
+                  setShowAuctionModal={setShowAuctionModal}
+                  setSelectedItemToSell={setSelectedItemToSell}   // <-- NOVO: permite ItemGrid abrir Sell flow por item
+                  getRarityColor={getRarityColor}
+                  getRarityGlow={getRarityGlow}
+                  getConditionColor={getConditionColor}
+                  calcPayout={calcPayout}
+                  user={user}
+                  setError={setError}
+                />
+
               <Pagination
                 filteredLength={filtered.length}
                 page={page}
@@ -519,16 +802,20 @@ export default function SkinsPage() {
         setCart={setCart}
       />
 
-      {sellMode && (
-        <SellModal
-          user={user}
-          isOpen={sellMode}
-          onClose={() => setSellMode(false)}
-          addNotification={addNotification}
-          setUser={setUser}
-          loadUserItems={loadUserItems}
-        />
-      )}
+{sellMode && (
+  <SellModal
+    user={user}
+    isOpen={sellMode}
+    onClose={() => { setSellMode(false); setSelectedItemToSell(null); }}
+    addNotification={addNotification}
+    setUser={setUser}
+    loadUserItems={loadUserItems}
+    selectedItem={selectedItemToSell}  // Can be removed if not using single select
+    createListing={createListingFromUserItem}  // Remove, as now using multi-sell
+    userItems={userItems}  // NEW: pass for grid
+  />
+)}
+
 
       <Notifications notifications={notifications} removeNotification={removeNotification} />
 

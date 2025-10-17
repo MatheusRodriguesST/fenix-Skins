@@ -1,243 +1,161 @@
 // src/app/api/bots/[steamId]/inventory/route.ts
 import { NextResponse } from "next/server";
 
-const APPID = 730;
-const CONTEXTS = ["2", "6"];
-const STEAMCDN_PREFIX = "https://steamcommunity-a.akamaihd.net/economy/image/";
-const DEFAULT_TIMEOUT_MS = 12000;
+type PriceOverview = {
+  success: boolean;
+  lowest_price?: string;
+  median_price?: string;
+  volume?: string;
+};
 
-function log(...args: any[]) {
-  console.log("[api:inventory]", ...args);
+async function fetchWithRetry(url: string, options: RequestInit = {}, retries = 3): Promise<Response> {
+  for (let i = 0; i < retries; i++) {
+    const res = await fetch(url, options);
+    if (res.ok || ![429, 503].includes(res.status)) return res;
+    if (i < retries - 1) await new Promise(resolve => setTimeout(resolve, 2 ** i * 1000)); // Backoff: 1s, 2s, 4s
+  }
+  throw new Error(`Fetch failed after ${retries} attempts`);
 }
 
-async function fetchWithTimeout(url: string, timeoutMs = DEFAULT_TIMEOUT_MS, init?: RequestInit) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
+export async function GET(req: Request, context: { params: Promise<{ steamId: string }> }) {  // *** CORRIGIDO: params como Promise
+  const { steamId } = await context.params;  // *** CORRIGIDO: Await params
+
+  // VERIFICAÇÃO MAIS ROBUSTA
+  // O erro 400 na API da Steam sugere que o steamId está inválido (provavelmente a string "undefined")
+  if (!steamId || steamId === "undefined" || !/^\d+$/.test(steamId)) {
+    console.error("Invalid steamId received:", steamId);
+    return NextResponse.json({ ok: false, message: "A valid steamId is required" }, { status: 400 });
+  }
+
+  const url = new URL(req.url);
+  const appid = url.searchParams.get("appid") ?? "730";
+  const contextid = url.searchParams.get("contextid") ?? "2";
+  const maxItems = Number(url.searchParams.get("limit") ?? "50");
+  const onlyTradable = url.searchParams.get("only_tradable") === "1";
+
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+  };
+
   try {
-    const res = await fetch(url, { signal: controller.signal, ...init });
-    clearTimeout(id);
-    return res;
+    // Fetch Steam inventory
+    const invUrl = `https://steamcommunity.com/inventory/${steamId}/${appid}/${contextid}?l=english&count=1000`;
+    const invRes = await fetchWithRetry(invUrl, { headers });
+
+    if (invRes.status === 403) return NextResponse.json({ ok: false, message: "Inventory is private" }, { status: 403 });
+    if (invRes.status === 404) return NextResponse.json({ ok: false, message: "Inventory not found" }, { status: 404 });
+    if (!invRes.ok) {
+      const errorText = await invRes.text();
+      console.error(`Steam inventory fetch failed for ${steamId}: status ${invRes.status}, body: ${errorText}`);
+      return NextResponse.json({ ok: false, message: `Failed to fetch inventory from Steam (status: ${invRes.status})` }, { status: 502 });
+    }
+
+    const invJson = await invRes.json();
+    const assets = invJson.assets ?? [];
+    const descriptions = invJson.descriptions ?? [];
+
+    const descMap = new Map<string, any>();
+    for (const d of descriptions) {
+      const key = `${d.classid}_${d.instanceid ?? "0"}`;
+      descMap.set(key, d);
+    }
+
+    const items: any[] = [];
+    for (const a of assets) {
+      const key = `${a.classid}_${a.instanceid ?? "0"}`;
+      const desc = descMap.get(key);
+      if (!desc) continue;
+      
+      const market_hash_name = desc.market_hash_name;
+      if (!market_hash_name) continue;
+
+      const id = a.assetid;
+      const icon = desc.icon_url ? `https://steamcommunity-a.akamaihd.net/economy/image/${desc.icon_url}` : null;
+      const tradable = Boolean(desc.tradable === 1 || desc.marketable === 1);
+
+      // *** CORRIGIDO: Float e pattern do ASSET (a), não do desc
+      const float = a.floatvalue ? parseFloat(a.floatvalue) : undefined;
+      const pattern = a.paintseed ? parseInt(a.paintseed) : undefined;
+      
+      // *** Stickers e charms do DESC (se presentes)
+      const stickers = desc.stickers ? desc.stickers.map((s: any) => ({ name: s.name || `Sticker ${s.sticker_item_id}`, wear: s.wear })) : [];
+      const charms = desc.charms ? desc.charms.map((c: any) => ({ name: c.name || `Charm ${c.charm_id}`, wear: c.wear })) : [];
+
+      items.push({ 
+        id, 
+        market_hash_name, 
+        name: desc.name, 
+        icon_url: icon, 
+        tradable, 
+        float, 
+        pattern, 
+        stickers: stickers.map((s: any) => s.name),  // Só nomes pros componentes
+        charms: charms.map((c: any) => c.name),     // Só nomes pros componentes
+      });
+    }
+
+    if (items.length === 0) {
+      return NextResponse.json({ ok: true, items: [] });
+    }
+
+    const itemsToPrice = (onlyTradable ? items.filter((i) => i.tradable) : items)
+      .slice(0, maxItems);
+
+    async function fetchPrice(market_hash_name: string): Promise<{ market_hash_name: string; lowest_price?: string; price_number?: number }> {
+      const q = encodeURIComponent(market_hash_name);
+      const priceUrl = `https://steamcommunity.com/market/priceoverview/?currency=1&appid=${appid}&market_hash_name=${q}`;
+      try {
+        const res = await fetchWithRetry(priceUrl, { headers, next: { revalidate: 3600 } }); // Cache for 1 hour
+        if (!res.ok) return { market_hash_name };
+        const json: PriceOverview = await res.json();
+        if (!json.success) return { market_hash_name };
+        
+        const lowest_price = json.lowest_price ?? json.median_price;
+        let price_number: number | undefined = undefined;
+        if (lowest_price) {
+          const digits = lowest_price.replace(/[^\d.,-]/g, "").replace(",", ".");
+          price_number = parseFloat(digits);
+          if (Number.isNaN(price_number)) price_number = undefined;
+        }
+        return { market_hash_name, lowest_price, price_number };
+      } catch (err) {
+        console.error("Price fetch err for:", market_hash_name, err);
+        return { market_hash_name };
+      }
+    }
+
+    const pricePromises = itemsToPrice.map((it) => fetchPrice(it.market_hash_name));
+    const priceResults = await Promise.all(pricePromises);
+    
+    const priceMap = new Map<string, any>();
+    for (const r of priceResults) {
+        if(r.lowest_price) priceMap.set(r.market_hash_name, r);
+    }
+    
+    const responseItems = items.map((it) => {
+      const p = priceMap.get(it.market_hash_name);
+      const priceNum = p?.price_number;
+      const recommended = typeof priceNum === "number" ? Number((priceNum * 0.95).toFixed(2)) : null;
+      
+      return {
+        id: it.id,
+        market_hash_name: it.market_hash_name,
+        name: it.name,
+        icon_url: it.icon_url,
+        tradable: it.tradable,
+        steam_price_display: p?.lowest_price ?? null,
+        steam_price_number: priceNum ?? null,
+        recommended_price: recommended,
+        float: it.float,
+        pattern: it.pattern,
+        stickers: it.stickers,
+        charms: it.charms,
+      };
+    });
+
+    return NextResponse.json({ ok: true, items: responseItems });
   } catch (err) {
-    clearTimeout(id);
-    throw err;
+    console.error("Inventory GET error for", steamId, err);
+    return NextResponse.json({ ok: false, message: "Internal server error" }, { status: 500 });
   }
-}
-
-type TryResult =
-  | { ok: true; json: any; status: number; snippet?: string }
-  | { ok: false; status?: number; snippet?: string; error?: string };
-
-async function tryFetchVariants(url: string): Promise<TryResult> {
-  // We'll try a few variants of headers and query parameters to coax Steam into returning JSON.
-  const tries: { name: string; init: RequestInit }[] = [];
-
-  // Basic UA only
-  tries.push({
-    name: "ua-only",
-    init: {
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Accept: "*/*",
-      },
-      cache: "no-cache",
-    },
-  });
-
-  // Add Referer pointing to steamcommunity profile
-  tries.push({
-    name: "ua-referer",
-    init: {
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Accept: "*/*",
-        Referer: "https://steamcommunity.com/",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-      cache: "no-cache",
-    },
-  });
-
-  // Try more aggressive headers (some endpoints like a referer + origin help)
-  tries.push({
-    name: "ua-referer-origin",
-    init: {
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Accept: "*/*",
-        Referer: "https://steamcommunity.com/",
-        Origin: "https://steamcommunity.com",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-      cache: "no-cache",
-    },
-  });
-
-  // Smaller count param sometimes helps; handled by caller by building URL variations.
-  for (const t of tries) {
-    try {
-      const res = await fetchWithTimeout(url, DEFAULT_TIMEOUT_MS, t.init);
-      const status = res.status;
-      const text = await res.text().catch(() => "");
-      // log the try
-      log(`attempt=${t.name} status=${status} len=${String(text).length}`);
-      // Steam sometimes returns literal null, or HTML page (starts with '<')
-      const snippet = text?.slice(0, 1000);
-
-      // If response doesn't start with '{' treat as failure (HTML / null)
-      if (!text || !text.trim().startsWith("{")) {
-        // but if status 200 and text === 'null' it's still not usable
-        return { ok: false, status, snippet, error: "non-json response" };
-      }
-
-      // try parse
-      try {
-        const parsed = JSON.parse(text);
-        return { ok: true, json: parsed, status, snippet };
-      } catch (e: unknown) {
-        return { ok: false, status, snippet, error: "json-parse-failed" };
-      }
-    } catch (err: any) {
-      const msg = (err && (err.message ?? String(err))) || String(err);
-      log(`fetch variant ${t.name} error:`, msg);
-      // continue to next variant
-    }
-  }
-
-  return { ok: false, error: "all variants failed" };
-}
-
-export async function GET(_req: Request, context: any) {
-  const start = Date.now();
-
-  // --- robust steamId extraction ---
-  let steamId: string | undefined;
-  try {
-    if (context?.params) {
-      const maybeParams = typeof context.params.then === "function" ? await context.params : context.params;
-      steamId = maybeParams?.steamId;
-    }
-  } catch (err: unknown) {
-    log("warning awaiting context.params:", (err as any)?.message ?? String(err));
-  }
-
-  // fallback: parse request URL if still not found
-  if (!steamId) {
-    try {
-      let urlObj: URL;
-      try {
-        urlObj = new URL(String(_req.url));
-      } catch {
-        urlObj = new URL(String(_req.url), "http://localhost:3000");
-      }
-      const parts = urlObj.pathname.split("/").filter(Boolean);
-      const botsIndex = parts.indexOf("bots");
-      if (botsIndex >= 0 && parts.length > botsIndex + 1) steamId = parts[botsIndex + 1];
-    } catch (err: unknown) {
-      log("warning parse URL fallback failed:", (err as any)?.message ?? String(err));
-    }
-  }
-
-  if (!steamId) {
-    log("missing steamId - returning 400");
-    return NextResponse.json({ ok: false, message: "Missing steamId" }, { status: 400 });
-  }
-
-  log(`start steamId=${steamId}`);
-
-  let finalJson: any = null;
-  let finalStatus: number | undefined = undefined;
-  let finalSnippet: string | undefined = undefined;
-
-  // Try multiple contexts and also try with smaller count values if needed
-  const countVariants = [5000, 1000, 200, 50];
-
-  for (const contextId of CONTEXTS) {
-    for (const count of countVariants) {
-      const url = `https://steamcommunity.com/inventory/${steamId}/${APPID}/${contextId}?l=english&count=${count}`;
-      log(`trying url context=${contextId} count=${count}`);
-      const result = await tryFetchVariants(url);
-
-      if (result.ok) {
-        finalJson = result.json;
-        finalStatus = result.status;
-        finalSnippet = result.snippet;
-        break;
-      } else {
-        finalStatus = result.status;
-        finalSnippet = result.snippet ?? result.error;
-        log(`try failed for context=${contextId} count=${count}: status=${result.status} error=${result.error}`);
-        // if steam returned non-json but status 200 perhaps it's 'null' meaning private/empty; keep trying other counts
-      }
-    }
-
-    if (finalJson) break;
-  }
-
-  // If we didn't get JSON from any variant, return debug info
-  if (!finalJson) {
-    log("all attempts failed. returning debug to caller", { status: finalStatus, snippet: finalSnippet });
-    return NextResponse.json(
-      {
-        ok: false,
-        message: "Failed to fetch inventory from Steam (tried multiple variants). See debug.snippet",
-        debug: { status: finalStatus, snippet: finalSnippet },
-      },
-      { status: 502 }
-    );
-  }
-
-  // Parse and normalize
-  const json = finalJson;
-  if (json?.success === false) {
-    log("steam success:false -> private or blocked", json);
-    return NextResponse.json({ ok: false, message: "Inventory is private or not available", debug: json }, { status: 403 });
-  }
-
-  const assets = json.assets ?? [];
-  const descs = json.descriptions ?? [];
-
-  if (!Array.isArray(assets) || assets.length === 0) {
-    log("inventory empty or no assets");
-    return NextResponse.json({ ok: true, steamId, count: 0, items: [], raw: { assets: assets.length ?? 0, descriptions: descs.length ?? 0 } });
-  }
-
-  const mapDesc = new Map<string, any>();
-  for (const d of descs) {
-    if (d?.classid !== undefined && d?.instanceid !== undefined) {
-      mapDesc.set(`${d.classid}_${d.instanceid}`, d);
-    }
-  }
-
-  const items = assets.map((a: any) => {
-    const key = `${a.classid}_${a.instanceid}`;
-    const d = mapDesc.get(key) ?? {};
-    const icon = d.icon_url_large || d.icon_url || d.icon || null;
-    const image = icon ? `${STEAMCDN_PREFIX}${icon}` : null;
-    return {
-      id: String(a.assetid ?? ""),
-      assetid: a.assetid,
-      classid: a.classid,
-      instanceid: a.instanceid,
-      contextid: a.contextid ?? CONTEXTS[0],
-      name: d.market_hash_name || d.market_name || d.name || "Unknown Item",
-      image,
-      tradable: d?.tradable === 1 || a?.tradable === 1 || false,
-      tags: d.tags || [], // Include for rarity/condition
-      descriptions: d.descriptions || [], // For stickers
-      // Add more if needed
-    };
-  });
-
-  log(`success: returning ${items.length} items (took ${Date.now() - start}ms)`);
-  return NextResponse.json({
-    ok: true,
-    steamId,
-    count: items.length,
-    items,
-    raw: { assets: assets.length, descriptions: descs.length },
-    tookMs: Date.now() - start,
-  });
 }

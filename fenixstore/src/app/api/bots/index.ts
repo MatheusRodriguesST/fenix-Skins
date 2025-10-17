@@ -6,7 +6,7 @@ import { NextApiRequest, NextApiResponse } from "next";
  * Cada bot precisa do steamId (string).
  */
 const BOT_LIST = [
-  { steamId: "76561198787178742", name: "FenixBot1" }
+  { steamId: "76561199680448274", name: "FenixBot1" }
 ];
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
