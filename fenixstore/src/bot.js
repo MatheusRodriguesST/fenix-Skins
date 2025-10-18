@@ -37,13 +37,18 @@ botAccounts.forEach((botConfig, index) => {
     pollInterval: 10000, // Poll every 10s
   });
 
+  const logOnBot = () => {
+    const twoFactorCode = SteamTotp.generateAuthCode(botConfig.shared_secret);
+    console.log(`Generated two-factor code for bot ${botConfig.steamid}`);
+    client.logOn({
+      accountName: botConfig.username,
+      password: botConfig.password,
+      twoFactorCode,
+    });
+  };
+
   console.log(`Logging on bot ${botConfig.steamid}`);
-  client.logOn({
-    accountName: botConfig.username,
-    password: botConfig.password,
-    sharedSecret: botConfig.shared_secret,
-    identitySecret: botConfig.identity_secret,
-  });
+  logOnBot();
 
   client.on('loggedOn', () => {
     console.log(`Bot ${botConfig.steamid} logged on successfully`);
@@ -53,16 +58,11 @@ botAccounts.forEach((botConfig, index) => {
 
   client.on('error', (err) => {
     console.error(`Bot ${botConfig.steamid} login error:`, err);
-    if (err.eresult === 84) {
+    if (err.eresult === SteamUser.EResult.RateLimitExceeded) {
       console.log(`RateLimitExceeded, waiting 30min before retry...`);
-      setTimeout(() => {
-        client.logOn({
-          accountName: botConfig.username,
-          password: botConfig.password,
-          sharedSecret: botConfig.shared_secret,
-          identitySecret: botConfig.identity_secret,
-        });
-      }, 30 * 60 * 1000);
+      setTimeout(logOnBot, 30 * 60 * 1000);
+    } else if (err.eresult === SteamUser.EResult.InvalidPassword || err.eresult === SteamUser.EResult.AccountLoginDeniedNeedTwoFactor) {
+      console.error(`Invalid credentials or two-factor issue for bot ${botConfig.steamid}`);
     }
   });
 
@@ -92,7 +92,7 @@ botAccounts.forEach((botConfig, index) => {
         receivedItems = await getReceivedItems(true); // true to force refresh descriptions
       } catch (err) {
         console.error(`Error getting received items for offer ${offer.id}:`, err);
-        await supabase.from('pending_sells').update({ status: 'failed', note: 'failed to get item details' }).eq('id', pending.id);
+        await supabase.from('pending_sells').update({ status: 'failed' }).eq('id', pending.id);
         return;
       }
 
@@ -106,7 +106,7 @@ botAccounts.forEach((botConfig, index) => {
         const inspectAction = matchingItem.actions?.find(action => action.name === 'Inspect in Game...');
         if (!inspectAction) {
           console.error(`No inspect link for item ${expectedAssetId}`);
-          await supabase.from('pending_sells').update({ status: 'failed', note: 'no inspect link' }).eq('id', pending.id);
+          await supabase.from('pending_sells').update({ status: 'failed' }).eq('id', pending.id);
           return;
         }
         const inspectUrl = inspectAction.link.replace('%owner_steamid%', botConfig.steamid).replace('%assetid%', matchingItem.assetid);
@@ -118,7 +118,7 @@ botAccounts.forEach((botConfig, index) => {
           body = response.body.toString('utf8');
         } catch (err) {
           console.error(`Error fetching inspect URL for item ${expectedAssetId}:`, err);
-          await supabase.from('pending_sells').update({ status: 'failed', note: 'inspect fetch failed' }).eq('id', pending.id);
+          await supabase.from('pending_sells').update({ status: 'failed' }).eq('id', pending.id);
           return;
         }
 
@@ -164,7 +164,7 @@ botAccounts.forEach((botConfig, index) => {
 
         if (insertError) {
           console.error(`Error creating listing for accepted ${pending.id}:`, insertError);
-          await supabase.from('pending_sells').update({ status: 'failed', note: 'listing creation failed' }).eq('id', pending.id);
+          await supabase.from('pending_sells').update({ status: 'failed' }).eq('id', pending.id);
           return;
         }
 
@@ -176,7 +176,7 @@ botAccounts.forEach((botConfig, index) => {
         }
       } else {
         console.error(`Trade ${offer.id} accepted but items mismatch!`);
-        await supabase.from('pending_sells').update({ status: 'failed', note: 'items mismatch' }).eq('id', pending.id);
+        await supabase.from('pending_sells').update({ status: 'failed' }).eq('id', pending.id);
       }
     } else if (offer.state === TradeOfferManager.EOfferState.Countered) {
       console.log(`Offer ${offer.id} was countered (modified by user), attempting to decline...`);
@@ -186,11 +186,11 @@ botAccounts.forEach((botConfig, index) => {
         } else {
           console.log(`Declined countered offer ${offer.id}`);
         }
-        await supabase.from('pending_sells').update({ status: 'failed', note: 'user modified offer' }).eq('id', pending.id);
+        await supabase.from('pending_sells').update({ status: 'failed' }).eq('id', pending.id);
       });
     } else if ([TradeOfferManager.EOfferState.Declined, TradeOfferManager.EOfferState.Canceled, TradeOfferManager.EOfferState.InvalidItems].includes(offer.state)) {
       console.log(`Offer ${offer.id} failed with state ${offer.state}`);
-      await supabase.from('pending_sells').update({ status: 'failed', note: `offer ${offer.state}` }).eq('id', pending.id);
+      await supabase.from('pending_sells').update({ status: 'failed' }).eq('id', pending.id);
     }
   });
 
@@ -224,8 +224,8 @@ cron.schedule('* * * * *', async () => {
     for (const pending of pendings) {
       console.log(`Processing pending ${pending.id} for user ${pending.user_id}, bot ${pending.bot_steam_id}`);
       const bot = bots[pending.bot_steam_id];
-      if (!bot) {
-        console.warn(`Bot ${pending.bot_steam_id} not found, skipping pending ${pending.id}`);
+      if (!bot || !bot.client.loggedOn) {
+        console.warn(`Bot ${pending.bot_steam_id} not found or not logged on, skipping pending ${pending.id}`);
         continue;
       }
 
@@ -237,7 +237,7 @@ cron.schedule('* * * * *', async () => {
       }
       if (!user || !user.trade_url) {
         console.log(`No user or trade_url for pending ${pending.id}, updating to failed`);
-        const { error: updateError } = await supabase.from('pending_sells').update({ status: 'failed', note: 'no trade_url' }).eq('id', pending.id);
+        const { error: updateError } = await supabase.from('pending_sells').update({ status: 'failed' }).eq('id', pending.id);
         if (updateError) {
           console.error(`Error updating pending ${pending.id}:`, updateError);
         }
@@ -255,7 +255,7 @@ cron.schedule('* * * * *', async () => {
       offer.send(async (err, status) => {
         if (err) {
           console.error(`Error sending offer for pending ${pending.id}:`, err);
-          const { error: updateError } = await supabase.from('pending_sells').update({ status: 'failed', note: err.message }).eq('id', pending.id);
+          const { error: updateError } = await supabase.from('pending_sells').update({ status: 'failed' }).eq('id', pending.id);
           if (updateError) {
             console.error(`Error updating pending ${pending.id} to failed:`, updateError);
           }
@@ -282,8 +282,8 @@ cron.schedule('* * * * *', async () => {
     for (const timedOut of timedOuts || []) {
       console.log(`Processing timed-out offer ${timedOut.trade_offer_id} for pending ${timedOut.id}`);
       const bot = bots[timedOut.bot_steam_id];
-      if (!bot) {
-        console.warn(`Bot ${timedOut.bot_steam_id} not found, deleting pending ${timedOut.id}`);
+      if (!bot || !bot.client.loggedOn) {
+        console.warn(`Bot ${timedOut.bot_steam_id} not found or not logged on, deleting pending ${timedOut.id}`);
         const { error: deleteError } = await supabase.from('pending_sells').delete().eq('id', timedOut.id);
         if (deleteError) {
           console.error(`Error deleting timed-out pending ${timedOut.id}:`, deleteError);
@@ -326,5 +326,3 @@ cron.schedule('* * * * *', async () => {
   // 3. Process accepted: already handled in sentOfferChanged, no need for cron check
   console.log('Cron job completed');
 });
-
-// In confirmCheckout (SkinsPage.tsx), when item sold, payout to listing.seller_id = listing.item.seller_payout (which is price - 5%)
