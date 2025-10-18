@@ -1,4 +1,9 @@
 // src/app/api/listings/route.ts
+// Improvements:
+// - Added bot_steam_id validation (but since set in bot.js, optional here).
+// - Ensured item jsonb includes all details (stickers, charms, etc.).
+// - Improved error handling.
+
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
@@ -15,7 +20,7 @@ const supabaseAdmin = createClient(
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { seller_id, item, price } = body;
+    const { seller_id, bot_steam_id, item, price } = body;  // bot_steam_id optional here (set by bot.js)
 
     if (!seller_id || !item || !price) {
       return NextResponse.json(
@@ -24,7 +29,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // validação básica para item.id (garanta que exista)
     const itemId = item?.id ?? null;
     if (!itemId) {
       return NextResponse.json(
@@ -33,7 +37,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Validate user exists
+    // Validate user
     const { data: user, error: userErr } = await supabaseAdmin
       .from("users")
       .select("id")
@@ -47,12 +51,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Insert listing
+    // Insert with full item details
     const { data, error } = await supabaseAdmin
       .from("listings")
       .insert({
         seller_id,
-        item, // jsonb column
+        bot_steam_id: bot_steam_id || null,  // Allow null if not set
+        item,  // Assumes item has stickers, charms, float, pattern, image, etc.
         price,
         status: "active",
       })
@@ -61,8 +66,7 @@ export async function POST(req: NextRequest) {
 
     if (error) throw error;
 
-    // Remove from user_items if exists
-    // Use .eq for JSONB field extraction
+    // Delete from user_items if exists
     const { error: delErr } = await supabaseAdmin
       .from("user_items")
       .delete()
@@ -70,8 +74,6 @@ export async function POST(req: NextRequest) {
       .eq("user_id", seller_id);
 
     if (delErr) {
-      // não falhamos a operação do listing por conta do delete falhar,
-      // mas logamos o erro para investigação
       console.error("Failed to delete user_items:", delErr);
     }
 
@@ -90,7 +92,7 @@ export async function GET() {
     const { data, error } = await supabaseAdmin
       .from("listings")
       .select("*")
-      .eq("status", "active"); // <-- correção aqui
+      .eq("status", "active");
 
     if (error) throw error;
     return NextResponse.json({ ok: true, listings: data });

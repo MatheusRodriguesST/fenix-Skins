@@ -3,6 +3,7 @@ import React from "react";
 import { motion } from "framer-motion";
 import { Heart, Eye, Gavel, Clock, Sticker, Link2 } from "lucide-react";
 
+// Props permanecem as mesmas
 interface Item {
   id: string;
   displayName: string;
@@ -17,7 +18,6 @@ interface Item {
   charms?: string[];
   float?: number;
   pattern?: number;
-  // For auction
   auctionId?: string;
   currentBid?: number;
   endTime?: Date;
@@ -35,8 +35,8 @@ interface ItemGridProps {
   placeBid: (item: Item) => void;
   setSelectedItemForAuction: (item: Item) => void;
   setShowAuctionModal: (show: boolean) => void;
-  getRarityColor: (rarity: string) => string;
-  getRarityGlow: (rarity: string) => string;
+  getRarityColor: (rarity: string) => string; // ex: 'yellow-400'
+  getRarityGlow: (rarity: string) => string; // ex: '#facc15' (código da cor)
   getConditionColor: (condition: string) => string;
   calcPayout: (price: number) => number;
   user: any | null;
@@ -47,42 +47,32 @@ const containerVariants = {
   hidden: { opacity: 0 },
   visible: {
     opacity: 1,
-    transition: {
-      staggerChildren: 0.1,
-      type: "spring",
-      damping: 15,
-      stiffness: 100,
-    },
+    transition: { staggerChildren: 0.07 },
   },
 };
 
 const itemVariants = {
-  hidden: { opacity: 0, y: 50, scale: 0.9 },
-  visible: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.5, ease: "easeOut" } },
+  hidden: { opacity: 0, y: 20, scale: 0.98 },
+  visible: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.4, ease: "easeOut" } },
 };
 
+// Componente para um slot de Sticker, para clareza
+const StickerSlot = ({ hasSticker }: { hasSticker: boolean }) => (
+    <div className={`w-6 h-6 rounded-md border border-yellow-200/20 flex items-center justify-center ${hasSticker ? 'bg-yellow-500/20' : 'bg-black/30'}`}>
+        {hasSticker && <Sticker className="w-3.5 h-3.5 text-yellow-300" />}
+    </div>
+);
+
 export default function ItemGrid({
-  viewMode,
-  pageItems,
-  favorites,
-  toggleFavorite,
-  setQuickViewItem,
-  addToCart,
-  bidInputs,
-  setBidInputs,
-  placeBid,
-  setSelectedItemForAuction,
-  setShowAuctionModal,
-  getRarityColor,
-  getRarityGlow,
-  getConditionColor,
-  calcPayout,
-  user,
-  setError,
+  viewMode, pageItems, favorites, toggleFavorite, setQuickViewItem,
+  addToCart, bidInputs, setBidInputs, placeBid, setSelectedItemForAuction,
+  setShowAuctionModal, getRarityColor, getRarityGlow, getConditionColor,
+  calcPayout, user, setError
 }: ItemGridProps) {
+  
   return (
     <motion.div
-      className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-6"
+      className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6"
       variants={containerVariants}
       initial="hidden"
       animate="visible"
@@ -91,89 +81,75 @@ export default function ItemGrid({
         <motion.div
           key={it.id}
           variants={itemVariants}
-          className={`bg-gradient-to-br from-neutral-900/40 to-yellow-900/20 rounded-3xl border border-${getRarityColor(it.rarity)}/50 p-4 hover:shadow-2xl hover:${getRarityGlow(it.rarity)} transition-all relative group overflow-hidden cursor-pointer`}
-          whileHover={{ scale: 1.05, rotate: [0, 1, -1, 0], transition: { duration: 0.3, ease: "easeInOut" } }}
-          onClick={() => setQuickViewItem(it)} // Abre modal ao clicar no card
+          className="bg-neutral-900/50 rounded-3xl border border-neutral-700/80 p-1.5 transition-all duration-300 relative group overflow-hidden cursor-pointer"
+          style={{
+            '--rarity-glow': getRarityGlow(it.rarity),
+            '--rarity-border': getRarityGlow(it.rarity) // Reutiliza a cor para a borda
+          } as React.CSSProperties}
+          whileHover={{ 
+            scale: 1.03, 
+            boxShadow: '0px 0px 25px -5px var(--rarity-glow)',
+            borderColor: 'var(--rarity-border)',
+          }}
+          onClick={() => setQuickViewItem(it)}
         >
-          {/* RarityParticles omitted for brevity, add if needed */}
-          <div className="absolute top-2 right-2 flex gap-2 opacity-0 group-hover:opacity-100 transition-all z-10">
-            <button onClick={(e) => { e.stopPropagation(); toggleFavorite(it.id); }} className={`p-2 rounded-full shadow ${favorites.includes(it.id) ? "bg-yellow-500 text-black" : "bg-neutral-800/70 text-gray-200"}`}><Heart className="w-5 h-5" /></button>
-            <button onClick={(e) => { e.stopPropagation(); setQuickViewItem(it); }} className="p-2 rounded-full bg-neutral-800/70 text-gray-200 shadow"><Eye className="w-5 h-5" /></button>
+          <div className="absolute top-2 right-2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+            <button onClick={(e) => { e.stopPropagation(); toggleFavorite(it.id); }} className={`p-2 rounded-full shadow-lg backdrop-blur-sm ${favorites.includes(it.id) ? "bg-yellow-500/80 text-black" : "bg-neutral-800/80 text-gray-200"}`}><Heart className="w-5 h-5" /></button>
+            <button onClick={(e) => { e.stopPropagation(); setQuickViewItem(it); }} className="p-2 rounded-full bg-neutral-800/80 text-gray-200 shadow-lg backdrop-blur-sm"><Eye className="w-5 h-5" /></button>
           </div>
 
-          <div className="relative w-full h-32 bg-neutral-800/50 rounded-2xl overflow-hidden flex items-center justify-center mb-4 shadow-inner group/image">
+          {/* Imagem e Overlays de Sticker/Charm */}
+          <div className="relative w-full h-40 bg-gradient-to-br from-neutral-800 to-neutral-900/50 rounded-2xl flex items-center justify-center mb-3 shadow-inner overflow-hidden">
             {it.image ? (
               <motion.img
                 src={it.image}
                 alt={it.displayName}
-                className="max-h-28 object-contain transition-transform group-hover/image:scale-110 cursor-pointer"
-                whileHover={{ rotate: [0, 5, -5, 0], transition: { duration: 0.5, repeat: Infinity, ease: "easeInOut" } }}
-                onClick={(e) => { e.stopPropagation(); setQuickViewItem(it); }} // Abre modal ao clicar na imagem
+                className="max-h-32 object-contain transition-transform duration-500 group-hover:scale-110"
               />
             ) : (
               <p className="text-sm text-gray-500">Sem imagem</p>
             )}
-            {/* Charms in top-right corner, minimal */}
-            {it.charms?.length > 0 && (
-              <div className="absolute top-1 right-1 flex flex-col gap-1">
-                {it.charms.slice(0, 2).map((charm, i) => (
-                  <div key={i} className="w-5 h-5 bg-purple-400/80 rounded flex items-center justify-center text-[10px] text-white font-bold shadow-sm">
-                    <Link2 className="w-2 h-2" />
-                  </div>
-                ))}
-                {it.charms.length > 2 && (
-                  <div className="w-5 h-5 bg-purple-400/80 rounded flex items-center justify-center text-[10px] text-white font-bold shadow-sm">
-                    +{it.charms.length - 2}
-                  </div>
-                )}
-              </div>
-            )}
-            {/* Stickers below image, minimal horizontal bar */}
-            {it.stickers?.length > 0 && (
-              <div className="absolute bottom-1 left-1/2 transform -translate-x-1/2 flex gap-0.5 bg-black/50 rounded px-1 py-0.5">
-                {it.stickers.slice(0, 3).map((sticker, i) => (
-                  <div key={i} className="w-3 h-3 bg-yellow-400/80 rounded flex items-center justify-center text-[8px] text-black font-bold shadow-sm">
-                    <Sticker className="w-1.5 h-1.5" />
-                  </div>
-                ))}
-                {it.stickers.length > 3 && (
-                  <div className="w-3 h-3 bg-yellow-400/80 rounded flex items-center justify-center text-[8px] text-black font-bold shadow-sm ml-0.5">
-                    +{it.stickers.length - 3}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
 
-          <div className="text-left mt-2">
-            <h3 className="text-base font-bold text-gray-100 truncate">{it.skin}</h3>
-            <p className="text-sm text-gray-300 truncate">{it.weapon}</p>
-            <p className={`text-sm font-semibold ${getConditionColor(it.condition)} mt-1`}>{it.condition}</p>
-            <p className={`text-xs font-bold text-${getRarityColor(it.rarity)} uppercase mt-1`}>{it.rarity}</p>
-            <div className="mt-3 flex items-center justify-between">
+            {/* Overlay para Charms */}
+            {it.charms && it.charms.length > 0 && (
+                <div className="absolute top-2 left-2 p-1.5 bg-purple-900/50 backdrop-blur-sm rounded-full shadow-lg">
+                    <Link2 className="w-4 h-4 text-purple-300" />
+                </div>
+            )}
+            
+            {/* Bandeja de Stickers */}
+            <div className="absolute bottom-0 left-0 w-full p-2 bg-gradient-to-t from-black/60 to-transparent">
+                <div className="flex justify-center items-center gap-2">
+                    {[...Array(4)].map((_, i) => (
+                        <StickerSlot key={i} hasSticker={!!it.stickers && i < it.stickers.length} />
+                    ))}
+                </div>
+            </div>
+          </div>
+          
+          {/* Informações do Item */}
+          <div className="px-2.5 pb-2 text-left">
+            <p className={`text-xs font-bold uppercase text-${getRarityColor(it.rarity)}`}>{it.rarity}</p>
+            <h3 className="text-base font-bold text-gray-100 truncate mt-0.5">{it.skin}</h3>
+            <p className="text-sm text-gray-400 truncate">{it.weapon}</p>
+            
+            <div className="flex justify-between items-end mt-3">
               <div>
-                <p className="text-lg font-extrabold text-yellow-400">R$ {viewMode === "auction" ? it.currentBid?.toFixed(2) : it.price.toFixed(2)}</p>
-                {viewMode === "auction" && it.endTime && (
-                  <p className="text-xs text-gray-400 flex items-center gap-1"><Clock className="w-3 h-3" /> {Math.floor((it.endTime.getTime() - Date.now()) / 3600000)} horas restantes</p>
-                )}
-                <p className="text-xs text-gray-400">Recebe: R$ {calcPayout(viewMode === "auction" ? it.currentBid || 0 : it.price).toFixed(2)}</p>
+                <p className={`text-sm font-semibold ${getConditionColor(it.condition)}`}>{it.condition}</p>
+                <p className="text-lg font-extrabold text-yellow-400 mt-1">
+                  R$ {viewMode === "auction" ? it.currentBid?.toFixed(2) : it.price.toFixed(2)}
+                </p>
               </div>
-              <div className="flex flex-col gap-2">
-                {viewMode === "market" ? (
-                  <button onClick={(e) => { e.stopPropagation(); addToCart(it); }} className="bg-yellow-500 text-black px-3 py-1.5 rounded-full text-xs font-bold hover:brightness-105 transition shadow">Adicionar</button>
-                ) : viewMode === "auction" ? (
-                  <>
-                    <input
-                      type="number"
-                      value={bidInputs[it.id] || ""}
-                      onChange={(e) => setBidInputs({...bidInputs, [it.id]: Number(e.target.value)})}
-                      placeholder="Lance"
-                      className="w-16 bg-neutral-800/50 border border-yellow-700/50 rounded-full px-2 py-1 text-xs text-center"
-                    />
-                    <button onClick={(e) => { e.stopPropagation(); placeBid(it); }} className="bg-yellow-500 text-black px-3 py-1.5 rounded-full text-xs font-bold hover:brightness-105 transition shadow flex items-center justify-center gap-1"><Gavel className="w-3 h-3" /></button>
-                  </>
-                ) : (
-                  <button onClick={(e) => { e.stopPropagation(); setSelectedItemForAuction(it); setShowAuctionModal(true); }} className="bg-yellow-500 text-black px-3 py-1.5 rounded-full text-xs font-bold hover:brightness-105 transition shadow flex items-center justify-center gap-1"><Gavel className="w-3 h-3" /></button>
+
+              <div className="text-right">
+                {viewMode === "market" && (
+                  <button onClick={(e) => { e.stopPropagation(); addToCart(it); }} className="bg-yellow-500 text-black px-4 py-2 rounded-full text-xs font-bold hover:brightness-110 transition shadow-lg shadow-yellow-500/20">Adicionar</button>
+                )}
+                {viewMode === "auction" && (
+                   <button onClick={(e) => { e.stopPropagation(); placeBid(it); }} className="bg-yellow-500 text-black px-4 py-2 rounded-full text-xs font-bold hover:brightness-110 transition shadow-lg shadow-yellow-500/20 flex items-center justify-center gap-1.5"><Gavel className="w-3.5 h-3.5" /> Dar Lance</button>
+                )}
+                 {viewMode === "inventory" && (
+                  <button onClick={(e) => { e.stopPropagation(); setSelectedItemForAuction(it); setShowAuctionModal(true); }} className="bg-yellow-500 text-black px-4 py-2 rounded-full text-xs font-bold hover:brightness-110 transition shadow-lg shadow-yellow-500/20 flex items-center justify-center gap-1.5"><Gavel className="w-3.5 h-3.5" /> Leiloar</button>
                 )}
               </div>
             </div>

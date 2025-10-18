@@ -1,8 +1,9 @@
 // src/components/QuickViewModal.tsx
 import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X } from "lucide-react";
+import { X, Sticker, Link2, Percent, GripVertical, ShoppingCart } from "lucide-react";
 
+// A interface do Item permanece a mesma
 interface Item {
   id: string;
   skin: string;
@@ -24,105 +25,159 @@ interface QuickViewModalProps {
   setCartOpen: (open: boolean) => void;
   user: any | null;
   setError: (err: string) => void;
-  getRarityColor: (rarity: string) => string;
+  getRarityColor: (rarity: string) => string; // ex: 'yellow-400'
+  getRarityGlow: (rarity: string) => string; // ex: '#facc15' (código da cor)
   calcPayout: (price: number) => number;
 }
 
+const backdropVariants = {
+  hidden: { opacity: 0 },
+  visible: { opacity: 1 },
+};
+
+const modalVariants = {
+  hidden: { scale: 0.9, opacity: 0, y: 50 },
+  visible: { scale: 1, opacity: 1, y: 0, transition: { type: "spring", damping: 20, stiffness: 200 } },
+  exit: { scale: 0.9, opacity: 0, y: 50, transition: { duration: 0.2 } },
+};
+
 export default function QuickViewModal({
-  quickViewItem,
-  setQuickViewItem,
-  addToCart,
-  setCartOpen,
-  user,
-  setError,
-  getRarityColor,
-  calcPayout,
+  quickViewItem, setQuickViewItem, addToCart, setCartOpen, user, setError, getRarityColor, getRarityGlow, calcPayout,
 }: QuickViewModalProps) {
-  if (!quickViewItem) return null;
-
   return (
-    <motion.div className="fixed inset-0 z-40 flex items-center justify-center bg-black/80" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setQuickViewItem(null)}>
-      <motion.div className="bg-neutral-900/95 rounded-3xl p-6 max-w-lg w-full mx-4 shadow-2xl relative overflow-hidden" initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.8, opacity: 0 }} transition={{ type: "spring", damping: 15, stiffness: 200 }} onClick={(e) => e.stopPropagation()}>
-        {/* RarityParticles omitted */}
-        <div className="flex justify-between items-start mb-4">
-          <div>
-            <h3 className="text-xl font-bold text-gray-100">{quickViewItem.skin}</h3>
-            <p className="text-sm text-gray-300">{quickViewItem.weapon} • {quickViewItem.condition}</p>
-            <p className={`text-sm font-bold text-${getRarityColor(quickViewItem.rarity)} uppercase`}>{quickViewItem.rarity}</p>
-          </div>
-          <button onClick={() => setQuickViewItem(null)} className="text-gray-400 hover:text-gray-200"><X className="w-6 h-6" /></button>
-        </div>
+    <AnimatePresence>
+      {quickViewItem && (
+        <motion.div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          variants={backdropVariants}
+          initial="hidden"
+          animate="visible"
+          exit="hidden"
+          onClick={() => setQuickViewItem(null)}
+        >
+          <motion.div
+            className="bg-gradient-to-br from-neutral-900 to-neutral-900/80 rounded-3xl p-6 max-w-2xl w-full mx-4 border shadow-2xl"
+            style={{ 
+              '--rarity-glow': getRarityGlow(quickViewItem.rarity),
+              borderColor: `rgba(${parseInt(getRarityGlow(quickViewItem.rarity).slice(1, 3), 16)}, ${parseInt(getRarityGlow(quickViewItem.rarity).slice(3, 5), 16)}, ${parseInt(getRarityGlow(quickViewItem.rarity).slice(5, 7), 16)}, 0.3)`
+            } as React.CSSProperties}
+            variants={modalVariants}
+            initial="hidden"
+            animate="visible"
+            exit="exit"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Cabeçalho */}
+            <div className="flex justify-between items-start mb-4 pb-4 border-b border-yellow-700/20">
+              <div>
+                <p className={`text-sm font-bold uppercase text-${getRarityColor(quickViewItem.rarity)}`}>{quickViewItem.rarity}</p>
+                <h2 className="text-2xl font-bold text-gray-100">{quickViewItem.skin}</h2>
+                <p className="text-md text-gray-400">{quickViewItem.weapon} • {quickViewItem.condition}</p>
+              </div>
+              <button onClick={() => setQuickViewItem(null)} className="p-2 rounded-full text-gray-400 hover:bg-neutral-800 hover:text-gray-100 transition-colors">
+                <X className="w-6 h-6" />
+              </button>
+            </div>
 
-        <div className="relative w-full h-48 bg-neutral-800/50 rounded-2xl overflow-hidden mb-6 flex items-center justify-center shadow-inner">
-          {quickViewItem.image && <img src={quickViewItem.image} className="max-h-44 object-contain" />}
-          {/* Charms in top-right corner */}
-          {quickViewItem.charms?.length > 0 && (
-            <div className="absolute top-2 right-2 flex flex-col gap-1">
-              {quickViewItem.charms.slice(0, 2).map((charm, i) => (
-                <div key={i} className="w-8 h-8 bg-purple-500/80 rounded-full flex items-center justify-center text-xs text-white font-bold shadow-lg">
-                  {charm.charAt(0).toUpperCase()}
+            {/* Corpo Principal: Imagem e Detalhes */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Coluna da Imagem */}
+              <div className="flex flex-col">
+                <div 
+                  className="relative w-full h-56 bg-neutral-800/50 rounded-2xl flex items-center justify-center shadow-inner mb-4"
+                  style={{ boxShadow: `0px 0px 20px -5px var(--rarity-glow)` }}
+                >
+                  {quickViewItem.image ? 
+                    <img src={quickViewItem.image} alt={quickViewItem.skin} className="max-h-48 object-contain" />
+                   : <p className="text-gray-500">Sem Imagem</p>
+                  }
                 </div>
-              ))}
-              {quickViewItem.charms.length > 2 && (
-                <div className="w-8 h-8 bg-purple-500/80 rounded-full flex items-center justify-center text-xs text-white font-bold shadow-lg">
-                  +{quickViewItem.charms.length - 2}
-                </div>
-              )}
-            </div>
-          )}
-          {/* Stickers below image */}
-          {quickViewItem.stickers?.length > 0 && (
-            <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 flex gap-1">
-              {quickViewItem.stickers.slice(0, 4).map((sticker, i) => (
-                <div key={i} className="w-6 h-6 bg-yellow-500/80 rounded flex items-center justify-center text-xs text-black font-bold shadow-md">
-                  {sticker.charAt(0).toUpperCase()}
-                </div>
-              ))}
-              {quickViewItem.stickers.length > 4 && (
-                <div className="w-6 h-6 bg-yellow-500/80 rounded flex items-center justify-center text-xs text-black font-bold shadow-md">
-                  +{quickViewItem.stickers.length - 4}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+                {/* Bandeja de Inspeção de Stickers */}
+                {quickViewItem.stickers && quickViewItem.stickers.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-300 mb-2">Stickers Aplicados</h4>
+                    <div className="grid grid-cols-4 gap-3 bg-neutral-950/50 p-3 rounded-xl border border-yellow-700/20">
+                      {[...Array(4)].map((_, i) => (
+                        <div key={i} className="aspect-square rounded-lg border-2 border-dashed border-yellow-200/20 flex items-center justify-center bg-black/30">
+                          {i < quickViewItem.stickers!.length && <Sticker className="w-6 h-6 text-yellow-300/70" />}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
 
-        <div className="grid grid-cols-2 gap-6 text-sm mb-6">
-          <div>
-            <p className="text-gray-300">Preço</p>
-            <p className="text-lg font-bold text-yellow-400">R$ {quickViewItem.price.toFixed(2)}</p>
-          </div>
-          <div>
-            <p className="text-gray-300">Você recebe</p>
-            <p className="text-lg font-bold text-green-400">R$ {calcPayout(quickViewItem.price).toFixed(2)}</p>
-          </div>
-          <div>
-            <p className="text-gray-300">Float</p>
-            <p className="text-sm">{quickViewItem.float?.toFixed(4) || "N/A"}</p>
-          </div>
-          <div>
-            <p className="text-gray-300">Pattern</p>
-            <p className="text-sm">{quickViewItem.pattern || "N/A"}</p>
-          </div>
-          {quickViewItem.stickers?.length > 0 && (
-            <div className="col-span-2">
-              <p className="text-gray-300">Stickers</p>
-              <p className="text-sm">{quickViewItem.stickers.join(", ")}</p>
-            </div>
-          )}
-          {quickViewItem.charms?.length > 0 && (
-            <div className="col-span-2">
-              <p className="text-gray-300">Charms</p>
-              <p className="text-sm">{quickViewItem.charms.join(", ")}</p>
-            </div>
-          )}
-        </div>
+              {/* Coluna de Detalhes */}
+              <div className="flex flex-col gap-4">
+                {/* Atributos Chave */}
+                <div>
+                  <h4 className="text-sm font-semibold text-gray-300 mb-2">Atributos Chave</h4>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-neutral-950/50 p-3 rounded-xl border border-yellow-700/20">
+                      <div className="flex items-center gap-2 text-yellow-400 text-xs mb-1"><Percent className="w-4 h-4" /> FLOAT</div>
+                      <p className="text-lg font-mono text-gray-100">{quickViewItem.float?.toFixed(6) || "N/A"}</p>
+                    </div>
+                     <div className="bg-neutral-950/50 p-3 rounded-xl border border-yellow-700/20">
+                      <div className="flex items-center gap-2 text-yellow-400 text-xs mb-1"><GripVertical className="w-4 h-4" /> PATTERN</div>
+                      <p className="text-lg font-mono text-gray-100">{quickViewItem.pattern || "N/A"}</p>
+                    </div>
+                  </div>
+                </div>
 
-        <div className="flex gap-4">
-          <button onClick={() => { if (!user) { setError("Você precisa estar logado para comprar."); return; } addToCart(quickViewItem); setQuickViewItem(null); }} className="flex-1 bg-yellow-500 text-black py-3 rounded-full font-bold shadow hover:brightness-105 transition">Adicionar ao carrinho</button>
-          <button onClick={() => { if (!user) { setError("Você precisa estar logado para comprar."); return; } addToCart(quickViewItem); setCartOpen(true); setQuickViewItem(null); }} className="flex-1 border border-yellow-700/50 py-3 rounded-full font-bold hover:bg-yellow-800/50 transition">Comprar agora</button>
-        </div>
-      </motion.div>
-    </motion.div>
+                {/* Lista de Stickers e Charms */}
+                {(quickViewItem.stickers?.length > 0 || quickViewItem.charms?.length > 0) && (
+                  <div className="space-y-3 text-sm">
+                    {quickViewItem.stickers && quickViewItem.stickers.length > 0 && (
+                      <div>
+                        <h4 className="font-semibold text-gray-300">Stickers:</h4>
+                        <ul className="list-inside list-disc text-gray-400 ml-1">
+                          {quickViewItem.stickers.map((s, i) => <li key={i}>{s}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                     {quickViewItem.charms && quickViewItem.charms.length > 0 && (
+                      <div>
+                        <h4 className="font-semibold text-gray-300">Charms:</h4>
+                        <ul className="list-inside list-disc text-gray-400 ml-1">
+                           {quickViewItem.charms.map((c, i) => <li key={i}>{c}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Rodapé: Preço e Ações */}
+            <div className="mt-6 pt-4 border-t border-yellow-700/20 flex items-center justify-between">
+                <div>
+                    <p className="text-sm text-gray-400">Preço</p>
+                    <p className="text-3xl font-extrabold text-yellow-400">R$ {quickViewItem.price.toFixed(2)}</p>
+                    <p className="text-xs text-green-400">Você recebe: R$ {calcPayout(quickViewItem.price).toFixed(2)}</p>
+                </div>
+                <div className="flex gap-3">
+                  <motion.button 
+                    onClick={() => { if (!user) { setError("Você precisa estar logado para comprar."); return; } addToCart(quickViewItem); setQuickViewItem(null); }} 
+                    className="flex-1 bg-yellow-500 text-black px-6 py-3 rounded-full font-bold shadow-lg shadow-yellow-500/20 flex items-center gap-2"
+                    whileHover={{ scale: 1.05, filter: 'brightness(1.1)' }}
+                    transition={{ type: 'spring', stiffness: 300 }}
+                  >
+                    <ShoppingCart className="w-5 h-5" /> Adicionar
+                  </motion.button>
+                  <motion.button 
+                    onClick={() => { if (!user) { setError("Você precisa estar logado para comprar."); return; } addToCart(quickViewItem); setCartOpen(true); setQuickViewItem(null); }} 
+                    className="flex-1 border border-yellow-700/50 text-gray-200 px-6 py-3 rounded-full font-bold hover:bg-yellow-900/50 transition-colors"
+                    whileHover={{ scale: 1.05 }}
+                    transition={{ type: 'spring', stiffness: 300 }}
+                  >
+                    Comprar
+                  </motion.button>
+                </div>
+            </div>
+
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

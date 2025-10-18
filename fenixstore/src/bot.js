@@ -4,7 +4,7 @@
 // Config: env with BOT_ACCOUNTS = JSON array [{username, password, shared_secret, identity_secret, steamid}]
 // SUPABASE_URL, SUPABASE_KEY
 
-require('dotenv').config({ path: '../.env' });  // Load .env from project root; adjust path if needed
+require('dotenv').config({ path: '../.env' }); // Load .env from project root; adjust path if needed
 
 const SteamUser = require('steam-user');
 const TradeOfferManager = require('steam-tradeoffer-manager');
@@ -12,6 +12,7 @@ const SteamCommunity = require('steamcommunity');
 const SteamTotp = require('steam-totp');
 const { createClient } = require('@supabase/supabase-js');
 const cron = require('node-cron');
+const util = require('util');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
@@ -21,7 +22,7 @@ console.log('Starting bot script...');
 console.log('Supabase URL:', supabaseUrl ? 'Set' : 'Not set');
 console.log('Supabase Key:', supabaseKey ? 'Set' : 'Not set');
 
-const botAccounts = JSON.parse(process.env.BOT_ACCOUNTS || "[]");  // [{username, password, shared_secret, identity_secret, steamid}]
+const botAccounts = JSON.parse(process.env.BOT_ACCOUNTS || "[]"); // [{username, password, shared_secret, identity_secret, steamid}]
 console.log('Bot accounts loaded:', botAccounts.length);
 
 const bots = {};
@@ -33,7 +34,7 @@ botAccounts.forEach((botConfig, index) => {
   const manager = new TradeOfferManager({
     steam: client,
     community: community,
-    pollInterval: 10000,  // Poll every 10s
+    pollInterval: 10000, // Poll every 10s
   });
 
   console.log(`Logging on bot ${botConfig.steamid}`);
@@ -52,6 +53,17 @@ botAccounts.forEach((botConfig, index) => {
 
   client.on('error', (err) => {
     console.error(`Bot ${botConfig.steamid} login error:`, err);
+    if (err.eresult === 84) {
+      console.log(`RateLimitExceeded, waiting 30min before retry...`);
+      setTimeout(() => {
+        client.logOn({
+          accountName: botConfig.username,
+          password: botConfig.password,
+          sharedSecret: botConfig.shared_secret,
+          identitySecret: botConfig.identity_secret,
+        });
+      }, 30 * 60 * 1000);
+    }
   });
 
   client.on('webSession', (sessionID, cookies) => {
@@ -63,38 +75,122 @@ botAccounts.forEach((botConfig, index) => {
 
   manager.on('sentOfferChanged', async (offer, oldState) => {
     console.log(`Offer ${offer.id} changed from state ${oldState} to ${offer.state} for bot ${botConfig.steamid}`);
+    
+    const pendingQuery = supabase.from('pending_sells').select('*').eq('trade_offer_id', offer.id).single();
+    const { data: pending, error: fetchError } = await pendingQuery;
+    if (fetchError || !pending) {
+      console.error(`Error fetching pending for offer ${offer.id} or no pending found:`, fetchError);
+      return;
+    }
+
     if (offer.state === TradeOfferManager.EOfferState.Accepted) {
       console.log(`Processing accepted offer ${offer.id}`);
-      const { data: pending, error: fetchError } = await supabase.from('pending_sells').select('*').eq('trade_offer_id', offer.id).eq('status', 'offer_sent').single();
-      if (fetchError) {
-        console.error(`Error fetching pending for offer ${offer.id}:`, fetchError);
+      // Get full received items with descriptions
+      const getReceivedItems = util.promisify(offer.getReceivedItems.bind(offer));
+      let receivedItems;
+      try {
+        receivedItems = await getReceivedItems(true); // true to force refresh descriptions
+      } catch (err) {
+        console.error(`Error getting received items for offer ${offer.id}:`, err);
+        await supabase.from('pending_sells').update({ status: 'failed', note: 'failed to get item details' }).eq('id', pending.id);
         return;
       }
-      if (pending) {
-        console.log(`Found pending ${pending.id} for offer ${offer.id}`);
-        const receivedItems = offer.itemsToReceive;
-        console.log(`Received items count: ${receivedItems.length}`);
-        const expectedAssetId = pending.asset_id;
-        const expectedMarketName = pending.market_hash_name;
-        const matchingItem = receivedItems.find((item) => item.assetid === expectedAssetId && item.market_hash_name === expectedMarketName);
-        if (matchingItem) {
-          console.log(`Item match found for ${expectedAssetId}`);
-          const { error: updateError } = await supabase.from('pending_sells').update({ status: 'accepted' }).eq('id', pending.id);
-          if (updateError) {
-            console.error(`Error updating pending ${pending.id} to accepted:`, updateError);
-          } else {
-            console.log(`Trade ${offer.id} accepted and verified for item ${expectedAssetId}`);
+
+      console.log(`Received items count: ${receivedItems.length}`);
+      const expectedAssetId = pending.asset_id;
+      const expectedMarketName = pending.market_hash_name;
+      const matchingItem = receivedItems.find((item) => item.assetid === expectedAssetId && item.market_hash_name === expectedMarketName);
+      if (matchingItem) {
+        console.log(`Item match found for ${expectedAssetId}`);
+        // Fetch full inspect data
+        const inspectAction = matchingItem.actions?.find(action => action.name === 'Inspect in Game...');
+        if (!inspectAction) {
+          console.error(`No inspect link for item ${expectedAssetId}`);
+          await supabase.from('pending_sells').update({ status: 'failed', note: 'no inspect link' }).eq('id', pending.id);
+          return;
+        }
+        const inspectUrl = inspectAction.link.replace('%owner_steamid%', botConfig.steamid).replace('%assetid%', matchingItem.assetid);
+
+        const httpRequest = util.promisify(community.httpRequest.bind(community));
+        let body;
+        try {
+          const response = await httpRequest(inspectUrl, {});
+          body = response.body.toString('utf8');
+        } catch (err) {
+          console.error(`Error fetching inspect URL for item ${expectedAssetId}:`, err);
+          await supabase.from('pending_sells').update({ status: 'failed', note: 'inspect fetch failed' }).eq('id', pending.id);
+          return;
+        }
+
+        const match = body.match(/var g_rgItemInfo = ({.*?});/s);
+        let itemInfo = {};
+        if (match && match[1]) {
+          try {
+            itemInfo = JSON.parse(match[1]);
+          } catch (parseErr) {
+            console.error(`Error parsing itemInfo for ${expectedAssetId}:`, parseErr);
           }
         } else {
-          console.error(`Trade ${offer.id} accepted but items mismatch!`);
-          const { error: updateError } = await supabase.from('pending_sells').update({ status: 'failed', note: 'items mismatch' }).eq('id', pending.id);
-          if (updateError) {
-            console.error(`Error updating pending ${pending.id} to failed:`, updateError);
-          }
+          console.warn(`No itemInfo found in inspect response for ${expectedAssetId}`);
+        }
+
+        // Build full item JSON
+        const fullItem = {
+          id: matchingItem.assetid,
+          displayName: matchingItem.market_hash_name,
+          price: pending.price,
+          seller_payout: parseFloat((pending.price * 0.95).toFixed(2)),
+          tradable: true,
+          float: itemInfo.paintwear || matchingItem.paintwear || null,
+          pattern: itemInfo.paintseed || matchingItem.paintseed || null,
+          stickers: itemInfo.stickers || matchingItem.stickers || [],
+          charms: itemInfo.charms || matchingItem.charms || null, // Fallback to null if charms not supported
+          appid: matchingItem.appid,
+          contextid: matchingItem.contextid,
+          classid: matchingItem.classid,
+          instanceid: matchingItem.instanceid,
+          icon_url: matchingItem.icon_url,
+          weapon: matchingItem.market_hash_name.split(' | ')[0] || null,
+          skin: matchingItem.market_hash_name.split(' | ')[1] || null,
+        };
+
+        // Create listing
+        const { data: listing, error: insertError } = await supabase.from('listings').insert({
+          seller_id: pending.user_id,
+          item: fullItem,
+          price: pending.price,
+          status: 'active',
+        }).select().single();
+
+        if (insertError) {
+          console.error(`Error creating listing for accepted ${pending.id}:`, insertError);
+          await supabase.from('pending_sells').update({ status: 'failed', note: 'listing creation failed' }).eq('id', pending.id);
+          return;
+        }
+
+        const { error: updateError } = await supabase.from('pending_sells').update({ status: 'listed', listing_id: listing.id }).eq('id', pending.id);
+        if (updateError) {
+          console.error(`Error updating pending ${pending.id} to listed:`, updateError);
+        } else {
+          console.log(`Trade ${offer.id} accepted, verified, and listing ${listing.id} created for item ${expectedAssetId}`);
         }
       } else {
-        console.log(`No pending found for accepted offer ${offer.id}`);
+        console.error(`Trade ${offer.id} accepted but items mismatch!`);
+        await supabase.from('pending_sells').update({ status: 'failed', note: 'items mismatch' }).eq('id', pending.id);
       }
+    } else if (offer.state === TradeOfferManager.EOfferState.Countered) {
+      console.log(`Offer ${offer.id} was countered (modified by user), attempting to decline...`);
+      offer.decline(async (err) => {
+        if (err) {
+          console.error(`Error declining countered offer ${offer.id}:`, err);
+        } else {
+          console.log(`Declined countered offer ${offer.id}`);
+        }
+        await supabase.from('pending_sells').update({ status: 'failed', note: 'user modified offer' }).eq('id', pending.id);
+      });
+    } else if ([TradeOfferManager.EOfferState.Declined, TradeOfferManager.EOfferState.Canceled, TradeOfferManager.EOfferState.InvalidItems].includes(offer.state)) {
+      console.log(`Offer ${offer.id} failed with state ${offer.state}`);
+      await supabase.from('pending_sells').update({ status: 'failed', note: `offer ${offer.state}` }).eq('id', pending.id);
     }
   });
 
@@ -113,10 +209,10 @@ botAccounts.forEach((botConfig, index) => {
   console.log(`Bot ${botConfig.steamid} initialized`);
 });
 
-// Cron job every minute to process pending and accepted
+// Cron job every minute to process pending, timed-out, and accepted
 cron.schedule('* * * * *', async () => {
-  console.log('Cron job started: Processing pending and accepted sells');
-  
+  console.log('Cron job started: Processing pending, timed-out, and accepted sells');
+
   // 1. Process pending: send offers
   const { data: pendings, error: pendingsError } = await supabase.from('pending_sells').select('*').eq('status', 'pending');
   if (pendingsError) {
@@ -151,7 +247,7 @@ cron.schedule('* * * * *', async () => {
 
       console.log(`Creating offer for pending ${pending.id}`);
       const offer = bot.manager.createOffer(user.trade_url);
-      offer.addTheirItem({ assetid: pending.asset_id, appid: 730, contextid: 2 });  // CS:GO appid
+      offer.addTheirItem({ assetid: pending.asset_id, appid: 730, contextid: 2 }); // CS:GO appid
       offer.setMessage("Trade for selling your item on FenixStore");
       console.log(`Offer created with item ${pending.asset_id}`);
 
@@ -176,52 +272,59 @@ cron.schedule('* * * * *', async () => {
     }
   }
 
-  // 2. Process accepted: create listing
-  const { data: accepteds, error: acceptedsError } = await supabase.from('pending_sells').select('*').eq('status', 'accepted');
-  if (acceptedsError) {
-    console.error('Error fetching accepteds:', acceptedsError);
-    return;
-  }
-  console.log(`Found ${accepteds ? accepteds.length : 0} accepted sells`);
-  if (accepteds) {
-    for (const accepted of accepteds) {
-      console.log(`Processing accepted ${accepted.id} for asset ${accepted.asset_id}`);
-      // Fetch full item data (assume from Steam or stored)
-      // For simplicity, create listing with item = {id: asset_id, displayName: market_hash_name, price: accepted.price, ...} - add more if needed
-      const item = {
-        id: accepted.asset_id,
-        displayName: accepted.market_hash_name,
-        // Add weapon, skin, etc. - may need to fetch from Steam API or store earlier
-        price: accepted.price,
-        tradable: true,
-        // ...
-      };
-      console.log(`Item data prepared for listing: ${JSON.stringify(item)}`);
-
-      console.log(`Inserting listing for accepted ${accepted.id}`);
-      const { data: listing, error } = await supabase.from('listings').insert({
-        seller_id: accepted.user_id,
-        item: item,
-        price: accepted.price,
-        status: 'active',
-      }).select().single();
-
-      if (error) {
-        console.error(`Error creating listing for accepted ${accepted.id}:`, error);
+  // 2. Process timed-out offers: cancel if >10 min and active
+  const timeoutThreshold = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const { data: timedOuts, error: timedOutsError } = await supabase.from('pending_sells').select('*').eq('status', 'offer_sent').lt('updated_at', timeoutThreshold);
+  if (timedOutsError) {
+    console.error('Error fetching timed-outs:', timedOutsError);
+  } else {
+    console.log(`Found ${timedOuts ? timedOuts.length : 0} timed-out offers`);
+    for (const timedOut of timedOuts || []) {
+      console.log(`Processing timed-out offer ${timedOut.trade_offer_id} for pending ${timedOut.id}`);
+      const bot = bots[timedOut.bot_steam_id];
+      if (!bot) {
+        console.warn(`Bot ${timedOut.bot_steam_id} not found, deleting pending ${timedOut.id}`);
+        const { error: deleteError } = await supabase.from('pending_sells').delete().eq('id', timedOut.id);
+        if (deleteError) {
+          console.error(`Error deleting timed-out pending ${timedOut.id}:`, deleteError);
+        } else {
+          console.log(`Successfully deleted timed-out pending ${timedOut.id} from database (no bot)`);
+        }
         continue;
       }
-      console.log(`Listing created: ID ${listing.id}`);
 
-      const { error: updateError } = await supabase.from('pending_sells').update({ status: 'listed', listing_id: listing.id }).eq('id', accepted.id);
-      if (updateError) {
-        console.error(`Error updating accepted ${accepted.id} to listed:`, updateError);
+      try {
+        const getOffer = util.promisify(bot.manager.getOffer.bind(bot.manager));
+        const offer = await getOffer(timedOut.trade_offer_id);
+        if (!offer) {
+          console.warn(`Offer ${timedOut.trade_offer_id} not found, proceeding to delete pending ${timedOut.id}`);
+        } else if (offer.state === TradeOfferManager.EOfferState.Active) {
+          const cancelOffer = util.promisify(offer.cancel.bind(offer));
+          try {
+            await cancelOffer();
+            console.log(`Canceled timed-out offer ${timedOut.trade_offer_id}`);
+          } catch (cancelErr) {
+            console.error(`Error canceling timed-out offer ${timedOut.trade_offer_id}:`, cancelErr);
+          }
+        } else {
+          console.log(`Offer ${timedOut.trade_offer_id} is not active (state: ${offer.state}), proceeding to delete`);
+        }
+      } catch (err) {
+        console.error(`Error loading offer ${timedOut.trade_offer_id}:`, err);
+      }
+
+      // Delete from DB regardless of cancel success
+      const { error: deleteError } = await supabase.from('pending_sells').delete().eq('id', timedOut.id);
+      if (deleteError) {
+        console.error(`Error deleting timed-out pending ${timedOut.id}:`, deleteError);
       } else {
-        console.log(`Listing ${listing.id} created for accepted ${accepted.id}`);
+        console.log(`Successfully deleted timed-out pending ${timedOut.id} from database`);
       }
     }
   }
-  
+
+  // 3. Process accepted: already handled in sentOfferChanged, no need for cron check
   console.log('Cron job completed');
 });
 
-// In confirmCheckout (SkinsPage.tsx), no change needed, as listing.seller_id is the original user, payout goes there.
+// In confirmCheckout (SkinsPage.tsx), when item sold, payout to listing.seller_id = listing.item.seller_payout (which is price - 5%)
